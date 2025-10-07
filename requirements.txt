@@ -1,0 +1,3 @@
+fastapi
+mcp>=1.16.0
+slack-sdk
