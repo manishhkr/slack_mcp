@@ -63,64 +63,147 @@ def destroy_session(session_id: str) -> str:
 
 @mcp.tool()
 def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List latest Slack IM channels (DMs). Requires a valid session_id from create_session."""
+    """List Slack DM channels with real user names if available; fallback to ID."""
     if bot_token and not session_id:
         return "error: session_required - call create_session(bot_token) and pass session_id"
+    
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
         resp = client.conversations_list(types="im", limit=limit)
-        return json.dumps(resp.get("channels", []), ensure_ascii=False)
+        channels = resp.get("channels", [])
+        result = []
+
+        for dm in channels:
+            user_id = dm.get("user")
+            if not user_id:
+                # fallback if no user_id
+                result.append({"channel_id": dm["id"], "channel_name": dm.get("name", dm["id"])})
+                continue
+            try:
+                user_info = client.users_info(user=user_id)
+                user_name = user_info["user"].get("real_name") or user_id
+                profile = user_info["user"]["profile"].get("email", "")
+                result.append({
+                    "channel_id": dm["id"],
+                    "channel_name": f"Direct Message with {user_name}",
+                    "profile": profile
+                })
+            except SlackApiError:
+                # fallback if users_info fails
+                result.append({"channel_id": dm["id"], "channel_name": f"Direct Message with {user_id}"})
+
+        return json.dumps(result, ensure_ascii=False)
+
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+
 
 
 @mcp.tool()
 def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List recent messages in an IM channel. Requires session_id from create_session."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
+    """List recent messages with actual user names; fallback to user ID if unavailable."""
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
         resp = client.conversations_history(channel=channel, limit=limit)
-        return json.dumps(resp.get("messages", []), ensure_ascii=False)
+        messages = resp.get("messages", [])
+        detailed = []
+
+        for msg in messages:
+            user_id = msg.get("user") or msg.get("bot_id") or "Unknown"
+            sender_name = user_id
+            profile = ""
+            if user_id.startswith("U"):
+                try:
+                    user_info = client.users_info(user=user_id)
+                    sender_name = user_info["user"].get("real_name") or user_id
+                    profile = user_info["user"]["profile"].get("email", "")
+                except SlackApiError:
+                    pass  # fallback to ID
+            detailed.append({
+                "text": msg.get("text", ""),
+                "sender_name": sender_name,
+                "profile": profile,
+                "ts": msg.get("ts")
+            })
+        return json.dumps(detailed, ensure_ascii=False)
+
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+
 
 
 @mcp.tool()
 def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    """Send a message to a channel (IM) or thread. Requires session_id from create_session."""
+    """Send a message to a channel (IM) or thread. Returns actual sender name and profile if available."""
     if bot_token and not session_id:
         return "error: session_required - call create_session(bot_token) and pass session_id"
+
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
         resp = client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
-        return json.dumps({"ok": resp.get("ok", False), "channel": resp.get("channel"), "ts": resp.get("ts")}, ensure_ascii=False)
+        sender_id = resp.get("message", {}).get("user") or resp.get("message", {}).get("bot_id") or "Unknown"
+        sender_name = sender_id
+        profile = ""
+        if sender_id.startswith("U"):
+            try:
+                user_info = client.users_info(user=sender_id)
+                sender_name = user_info["user"].get("real_name") or sender_id
+                profile = user_info["user"]["profile"].get("email", "")
+            except SlackApiError:
+                pass  # fallback to ID
+        return json.dumps({
+            "ok": resp.get("ok", False),
+            "channel": channel,
+            "ts": resp.get("ts"),
+            "sender_name": sender_name,
+            "profile": profile
+        }, ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
 
 
+
 @mcp.tool()
 def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    """Auto-reply to the most recent DM using provided text (or a default). Requires session_id."""
+    """Auto-reply to the most recent DM. Returns sender name and profile info."""
     if not text:
         text = "Thanks! I'll get back to you soon."
     if bot_token and not session_id:
         return "error: session_required - call create_session(bot_token) and pass session_id"
+
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
         ims = client.conversations_list(types="im", limit=1).get("channels", [])
         if not ims:
             return "error: no_im_channels"
+
         ch = ims[0]["id"]
         resp = client.chat_postMessage(channel=ch, text=text)
-        return json.dumps({"channel": ch, "ts": resp.get("ts")}, ensure_ascii=False)
+
+        sender_id = resp.get("message", {}).get("user") or resp.get("message", {}).get("bot_id") or "Unknown"
+        sender_name = sender_id
+        profile = ""
+        if sender_id.startswith("U"):
+            try:
+                user_info = client.users_info(user=sender_id)
+                sender_name = user_info["user"].get("real_name") or sender_id
+                profile = user_info["user"]["profile"].get("email", "")
+            except SlackApiError:
+                pass  # fallback to ID
+
+        return json.dumps({
+            "channel": ch,
+            "ts": resp.get("ts"),
+            "sender_name": sender_name,
+            "profile": profile
+        }, ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+
 
 
 # if __name__ == "__main__":
