@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from typing import Optional
-
 import json
 import os
 import uuid
@@ -9,16 +7,13 @@ from mcp.server.fastmcp import FastMCP
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-
 mcp = FastMCP("slack")
-
 
 # In-memory session storage mapping session_id -> bot_token
 SESSION_TOKENS: dict[str, str] = {}
 
-
- 
-
+# Map each user to their current session (user_id could be Dify session or any unique identifier)
+USER_SESSIONS: dict[str, str] = {}
 
 def _client(token: str) -> WebClient:
     # Allow referencing secrets via environment variables: env:VAR_NAME
@@ -33,7 +28,6 @@ def _client(token: str) -> WebClient:
         raise ValueError("Expected a Slack Bot token starting with xoxb-")
     return WebClient(token=token)
 
-
 def _resolve_session_token(session_id: Optional[str]) -> str:
     if not session_id:
         raise ValueError("missing_session_id: call create_session(bot_token) first")
@@ -42,32 +36,35 @@ def _resolve_session_token(session_id: Optional[str]) -> str:
         raise ValueError("invalid_session_id: create a new session via create_session")
     return token
 
+def get_user_session(user_id: str) -> str:
+    session_id = USER_SESSIONS.get(user_id)
+    if not session_id:
+        raise ValueError("missing_session_id: call create_session(bot_token) first")
+    return session_id
 
 @mcp.tool()
-def create_session(bot_token: str) -> str:
-    """Create a session and store the provided bot token. Returns session_id."""
-    _ = _client(bot_token)  # validate format and token usability lazily
+def create_session(bot_token: str, user_id: str) -> str:
+    """Create a session for a user and store the bot token."""
+    _ = _client(bot_token)  # validate token
     session_id = uuid.uuid4().hex
     SESSION_TOKENS[session_id] = bot_token
+    USER_SESSIONS[user_id] = session_id
     return json.dumps({"session_id": session_id})
 
-
 @mcp.tool()
-def destroy_session(session_id: str) -> str:
-    """Delete a previously created session."""
-    if session_id in SESSION_TOKENS:
+def destroy_session(user_id: str) -> str:
+    """Delete a previously created session for a user."""
+    session_id = USER_SESSIONS.get(user_id)
+    if session_id and session_id in SESSION_TOKENS:
         del SESSION_TOKENS[session_id]
+        del USER_SESSIONS[user_id]
         return json.dumps({"ok": True})
-    return json.dumps({"ok": False, "error": "invalid_session_id"})
-
+    return json.dumps({"ok": False, "error": "no_session_found"})
 
 @mcp.tool()
-def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List Slack DM channels with real user names if available; fallback to ID."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    
-    token = _resolve_session_token(session_id)
+def list_dms(user_id: str, limit: int = 20) -> str:
+    """List Slack DM channels with real names if available, fallback to ID."""
+    token = _resolve_session_token(get_user_session(user_id))
     client = _client(token)
     try:
         resp = client.conversations_list(types="im", limit=limit)
@@ -75,14 +72,13 @@ def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, 
         result = []
 
         for dm in channels:
-            user_id = dm.get("user")
-            if not user_id:
-                # fallback if no user_id
+            dm_user_id = dm.get("user")  # renamed for clarity
+            if not dm_user_id:
                 result.append({"channel_id": dm["id"], "channel_name": dm.get("name", dm["id"])})
                 continue
             try:
-                user_info = client.users_info(user=user_id)
-                user_name = user_info["user"].get("real_name") or user_id
+                user_info = client.users_info(user=dm_user_id)
+                user_name = user_info["user"].get("real_name") or dm_user_id
                 profile = user_info["user"]["profile"].get("email", "")
                 result.append({
                     "channel_id": dm["id"],
@@ -90,20 +86,15 @@ def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, 
                     "profile": profile
                 })
             except SlackApiError:
-                # fallback if users_info fails
-                result.append({"channel_id": dm["id"], "channel_name": f"Direct Message with {user_id}"})
-
+                result.append({"channel_id": dm["id"], "channel_name": f"Direct Message with {dm_user_id}"})
         return json.dumps(result, ensure_ascii=False)
-
     except SlackApiError as e:
         return f"error: {e.response['error']}"
 
-
-
 @mcp.tool()
-def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List recent messages with actual user names; fallback to user ID if unavailable."""
-    token = _resolve_session_token(session_id)
+def list_recent_messages(user_id: str, channel: str, limit: int = 20) -> str:
+    """List recent messages with actual user names; fallback to user ID."""
+    token = _resolve_session_token(get_user_session(user_id))
     client = _client(token)
     try:
         resp = client.conversations_history(channel=channel, limit=limit)
@@ -111,16 +102,16 @@ def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_
         detailed = []
 
         for msg in messages:
-            user_id = msg.get("user") or msg.get("bot_id") or "Unknown"
-            sender_name = user_id
+            sender_id = msg.get("user") or msg.get("bot_id") or "Unknown"
+            sender_name = sender_id
             profile = ""
-            if user_id.startswith("U"):
+            if sender_id.startswith("U"):
                 try:
-                    user_info = client.users_info(user=user_id)
-                    sender_name = user_info["user"].get("real_name") or user_id
+                    user_info = client.users_info(user=sender_id)
+                    sender_name = user_info["user"].get("real_name") or sender_id
                     profile = user_info["user"]["profile"].get("email", "")
                 except SlackApiError:
-                    pass  # fallback to ID
+                    pass
             detailed.append({
                 "text": msg.get("text", ""),
                 "sender_name": sender_name,
@@ -128,19 +119,13 @@ def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_
                 "ts": msg.get("ts")
             })
         return json.dumps(detailed, ensure_ascii=False)
-
     except SlackApiError as e:
         return f"error: {e.response['error']}"
 
-
-
 @mcp.tool()
-def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    """Send a message to a channel (IM) or thread. Returns actual sender name and profile if available."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-
-    token = _resolve_session_token(session_id)
+def send_reply(user_id: str, channel: str, text: str, thread_ts: Optional[str] = None) -> str:
+    """Send message to channel/thread. Returns sender name & profile."""
+    token = _resolve_session_token(get_user_session(user_id))
     client = _client(token)
     try:
         resp = client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
@@ -153,7 +138,7 @@ def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_tok
                 sender_name = user_info["user"].get("real_name") or sender_id
                 profile = user_info["user"]["profile"].get("email", "")
             except SlackApiError:
-                pass  # fallback to ID
+                pass
         return json.dumps({
             "ok": resp.get("ok", False),
             "channel": channel,
@@ -164,24 +149,33 @@ def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_tok
     except SlackApiError as e:
         return f"error: {e.response['error']}"
 
-
-
 @mcp.tool()
-def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
+def auto_reply_latest(user_id: str, text: Optional[str] = None) -> str:
     """Auto-reply to the most recent DM. Returns sender name and profile info."""
     if not text:
         text = "Thanks! I'll get back to you soon."
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-
-    token = _resolve_session_token(session_id)
+    token = _resolve_session_token(get_user_session(user_id))
     client = _client(token)
     try:
-        ims = client.conversations_list(types="im", limit=1).get("channels", [])
+        ims = client.conversations_list(types="im").get("channels", [])
         if not ims:
             return "error: no_im_channels"
 
-        ch = ims[0]["id"]
+        # Find the DM with the latest message
+        latest_dm = None
+        latest_ts = 0
+        for dm in ims:
+            hist = client.conversations_history(channel=dm["id"], limit=1).get("messages", [])
+            if hist:
+                ts = float(hist[0].get("ts", 0))
+                if ts > latest_ts:
+                    latest_ts = ts
+                    latest_dm = dm
+
+        if not latest_dm:
+            return "error: no_recent_dm_found"
+
+        ch = latest_dm["id"]
         resp = client.chat_postMessage(channel=ch, text=text)
 
         sender_id = resp.get("message", {}).get("user") or resp.get("message", {}).get("bot_id") or "Unknown"
@@ -193,8 +187,7 @@ def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = Non
                 sender_name = user_info["user"].get("real_name") or sender_id
                 profile = user_info["user"]["profile"].get("email", "")
             except SlackApiError:
-                pass  # fallback to ID
-
+                pass
         return json.dumps({
             "channel": ch,
             "ts": resp.get("ts"),
@@ -203,9 +196,6 @@ def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = Non
         }, ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
-
-
-
 # if __name__ == "__main__":
 #     host = os.getenv("FASTMCP_HOST", "0.0.0.0")
 #     port = int(os.getenv("FASTMCP_PORT") or os.getenv("PORT") or 8001)
