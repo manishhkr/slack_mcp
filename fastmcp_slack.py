@@ -4,6 +4,7 @@ from typing import Optional
 import json
 import os
 import uuid
+import hashlib
 from mcp.server.fastmcp import FastMCP
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -12,6 +13,8 @@ mcp = FastMCP("slack")
 
 # In-memory session storage mapping session_id -> bot_token
 SESSION_TOKENS: dict[str, str] = {}
+# Map per-token default sessions (keyed by a hash of the bot token) to avoid cross-user bleed
+DEFAULT_SESSION_BY_TOKEN_KEY: dict[str, str] = {}
 
 def _client(token: str) -> WebClient:
     # Allow referencing secrets via environment variables: env:VAR_NAME
@@ -28,31 +31,67 @@ def _client(token: str) -> WebClient:
 
 def _resolve_session_token(session_id: Optional[str]) -> str:
     if not session_id:
-        raise ValueError("missing_session_id: call create_session(bot_token) first")
+        raise ValueError("missing_session_id: set SLACK_BOT_TOKEN env or call create_session(bot_token)")
     token = SESSION_TOKENS.get(session_id)
     if not token:
         raise ValueError("invalid_session_id: create a new session via create_session")
     return token
+
+def _token_key(token: str) -> str:
+    # Use a stable hash to key defaults without exposing raw token in memory maps beyond SESSION_TOKENS
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _ensure_default_session(bot_token: Optional[str]) -> str:
+    """Return a session_id for the provided token (or env token), creating one if needed.
+
+    This isolates default sessions per distinct bot token, preventing cross-user leakage.
+    """
+    # Resolve token from arg or env
+    resolved_token: Optional[str] = bot_token or os.getenv("SLACK_BOT_TOKEN")
+    if not resolved_token:
+        raise ValueError("missing_bot_token: provide bot_token once or set SLACK_BOT_TOKEN")
+
+    # Validate token format early
+    _ = _client(resolved_token)
+
+    key = _token_key(resolved_token)
+    existing_session_id = DEFAULT_SESSION_BY_TOKEN_KEY.get(key)
+    if existing_session_id and existing_session_id in SESSION_TOKENS and SESSION_TOKENS[existing_session_id] == resolved_token:
+        return existing_session_id
+
+    # Create new session bound to this token
+    new_session_id = uuid.uuid4().hex
+    SESSION_TOKENS[new_session_id] = resolved_token
+    DEFAULT_SESSION_BY_TOKEN_KEY[key] = new_session_id
+    return new_session_id
 
 @mcp.tool()
 def create_session(bot_token: str) -> str:
     _ = _client(bot_token)  # validate token
     session_id = uuid.uuid4().hex
     SESSION_TOKENS[session_id] = bot_token
+    # Register/overwrite default for this specific bot token
+    DEFAULT_SESSION_BY_TOKEN_KEY[_token_key(bot_token)] = session_id
     return json.dumps({"session_id": session_id})
 
 @mcp.tool()
 def destroy_session(session_id: str) -> str:
     if session_id in SESSION_TOKENS:
+        token = SESSION_TOKENS[session_id]
         del SESSION_TOKENS[session_id]
+        # Clear default mapping for this token if it pointed to this session
+        key = _token_key(token)
+        if DEFAULT_SESSION_BY_TOKEN_KEY.get(key) == session_id:
+            del DEFAULT_SESSION_BY_TOKEN_KEY[key]
         return json.dumps({"ok": True})
     return json.dumps({"ok": False, "error": "invalid_session_id"})
 
 @mcp.tool()
 def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
     """List latest Slack IMs, multi-person IMs, and private channels with names and profiles."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
+    # If no session provided, ensure/create default using token arg or env
+    if not session_id:
+        session_id = _ensure_default_session(bot_token)
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
@@ -87,8 +126,8 @@ def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, 
 
 @mcp.tool()
 def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
+    if not session_id:
+        session_id = _ensure_default_session(bot_token)
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
@@ -129,8 +168,8 @@ def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_
 
 @mcp.tool()
 def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
+    if not session_id:
+        session_id = _ensure_default_session(bot_token)
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
@@ -167,8 +206,8 @@ def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_tok
 def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
     if not text:
         text = "Thanks! I'll get back to you soon."
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
+    if not session_id:
+        session_id = _ensure_default_session(bot_token)
     token = _resolve_session_token(session_id)
     client = _client(token)
     try:
