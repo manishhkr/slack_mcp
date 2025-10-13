@@ -14,12 +14,12 @@ services:
       - key: FASTMCP_PORT
         value: 8010
       - key: DB_HOST
-        value: dpg-d3mj59u3jp1c7380oigg-a
+        value: dpg-d3mjsv33fgac73b0ucj0-a
       - key: DB_PORT
         value: 5432
       - key: DB_NAME
-        value: slack_db_iur4
+        value: slack_db_rhje
       - key: DB_USER
-        value: slack_db_iur4_user
+        value: slack_db_rhje_user
       - key: DB_PASSWORD
-        sync: false   # mark as secret in Render
+        sync: false   # secret

@@ -1,6 +1,4 @@
 fastapi
-uvicorn
 mcp>=1.16.0
 slack-sdk
 psycopg2-binary
-python-dotenv
