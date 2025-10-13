@@ -105,6 +105,10 @@ def sign_up(username: str, password: str, bot_token: str) -> str:
                 (username, salt, pwd_hash, bot_token, int(time.time())),
             )
             conn.commit()
+    try:
+        print(f"sign_up: inserted user '{username}' into DB {DATABASE_URL}")
+    except Exception:
+        pass
     return json.dumps({"ok": True}, ensure_ascii=False)
 
 
@@ -117,6 +121,19 @@ def login(username: str, password: str) -> str:
         return json.dumps({"ok": True}, ensure_ascii=False)
     except Exception:
         return json.dumps({"ok": False, "error": "invalid_credentials"}, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_user(username: str) -> str:
+    """Debug: Return whether a user exists and when created (no secrets)."""
+    _db_init()
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, created_at FROM users WHERE username=%s", (username,))
+            row = cur.fetchone()
+            if not row:
+                return json.dumps({"exists": False})
+            return json.dumps({"exists": True, "username": row["username"], "created_at": row["created_at"]})
 
 
 # create_session removed (sessions not used)
@@ -242,6 +259,12 @@ if __name__ == "__main__":
     host = os.getenv("FASTMCP_HOST", "0.0.0.0")
     # On Render and Heroku-like platforms, PORT is provided by the platform.
     port = int(os.getenv("FASTMCP_PORT") or os.getenv("PORT") or 8010)
+
+    # Ensure database schema exists on startup (creates users table if missing)
+    try:
+        _db_init()
+    except Exception as e:
+        print(f"Warning: DB init failed: {e}")
 
     mcp.settings.host = host
     mcp.settings.port = port
