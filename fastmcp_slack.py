@@ -5,16 +5,56 @@ from typing import Optional
 import json
 import os
 import uuid
+import hashlib
+import hmac
+import time
 from mcp.server.fastmcp import FastMCP
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 
 mcp = FastMCP("slack")
 
 
-# In-memory session storage mapping session_id -> bot_token
-SESSION_TOKENS: dict[str, str] = {}
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+
+def _db_connect():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL not set")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def _db_init() -> None:
+    # Initialize tables if they don't exist
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    salt TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    bot_token TEXT NOT NULL,
+                    created_at BIGINT NOT NULL
+                );
+                """
+            )
+            conn.commit()
+
+
+def _hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
+    if not salt:
+        salt = uuid.uuid4().hex
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000)
+    return salt, dk.hex()
+
+
+def _verify_password(password: str, salt: str, password_hash_hex: str) -> bool:
+    _, computed_hex = _hash_password(password, salt)
+    return hmac.compare_digest(computed_hex, password_hash_hex)
 
 
  
@@ -34,39 +74,61 @@ def _client(token: str) -> WebClient:
     return WebClient(token=token)
 
 
-def _resolve_session_token(session_id: Optional[str]) -> str:
-    if not session_id:
-        raise ValueError("missing_session_id: call create_session(bot_token) first")
-    token = SESSION_TOKENS.get(session_id)
-    if not token:
-        raise ValueError("invalid_session_id: create a new session via create_session")
-    return token
+def _resolve_token_by_credentials(username: str, password: str) -> str:
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT salt, password_hash, bot_token FROM users WHERE username=%s", (username,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("invalid_credentials")
+            if not _verify_password(password, row["salt"], row["password_hash"]):
+                raise ValueError("invalid_credentials")
+            return row["bot_token"]
+
+
+# Sessions removed; authenticate with username/password per call
 
 
 @mcp.tool()
-def create_session(bot_token: str) -> str:
-    """Create a session and store the provided bot token. Returns session_id."""
-    _ = _client(bot_token)  # validate format and token usability lazily
-    session_id = uuid.uuid4().hex
-    SESSION_TOKENS[session_id] = bot_token
-    return json.dumps({"session_id": session_id})
+def sign_up(username: str, password: str, bot_token: str) -> str:
+    """Register a new user with username, password, and Slack bot token."""
+    _ = _client(bot_token)  # validate token format
+    _db_init()
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username FROM users WHERE username=%s", (username,))
+            if cur.fetchone():
+                return json.dumps({"ok": False, "error": "username_taken"}, ensure_ascii=False)
+            salt, pwd_hash = _hash_password(password)
+            cur.execute(
+                "INSERT INTO users (username, salt, password_hash, bot_token, created_at) VALUES (%s, %s, %s, %s, %s)",
+                (username, salt, pwd_hash, bot_token, int(time.time())),
+            )
+            conn.commit()
+    return json.dumps({"ok": True}, ensure_ascii=False)
 
 
 @mcp.tool()
-def destroy_session(session_id: str) -> str:
-    """Delete a previously created session."""
-    if session_id in SESSION_TOKENS:
-        del SESSION_TOKENS[session_id]
-        return json.dumps({"ok": True})
-    return json.dumps({"ok": False, "error": "invalid_session_id"})
+def login(username: str, password: str) -> str:
+    """Verify credentials for an existing user."""
+    _db_init()
+    try:
+        _ = _resolve_token_by_credentials(username, password)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+    except Exception:
+        return json.dumps({"ok": False, "error": "invalid_credentials"}, ensure_ascii=False)
+
+
+# create_session removed (sessions not used)
+
+
+# destroy_session removed (sessions not used)
 
 
 @mcp.tool()
-def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List latest Slack IM channels (DMs). Requires a valid session_id from create_session."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    token = _resolve_session_token(session_id)
+def list_dms(username: str, password: str, limit: int = 20) -> str:
+    """List latest Slack IM channels (DMs) for the authenticated user."""
+    token = _resolve_token_by_credentials(username, password)
     client = _client(token)
     try:
         resp = client.conversations_list(types="im", limit=limit)
@@ -76,11 +138,9 @@ def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, 
 
 
 @mcp.tool()
-def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List recent messages in an IM channel. Requires session_id from create_session."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    token = _resolve_session_token(session_id)
+def list_recent_messages(channel: str, username: str, password: str, limit: int = 20) -> str:
+    """List recent messages in an IM channel for the authenticated user."""
+    token = _resolve_token_by_credentials(username, password)
     client = _client(token)
     try:
         resp = client.conversations_history(channel=channel, limit=limit)
@@ -90,11 +150,9 @@ def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_
 
 
 @mcp.tool()
-def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    """Send a message to a channel (IM) or thread. Requires session_id from create_session."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    token = _resolve_session_token(session_id)
+def send_reply(channel: str, text: str, username: str, password: str, thread_ts: Optional[str] = None) -> str:
+    """Send a message to a channel (IM) or thread for the authenticated user."""
+    token = _resolve_token_by_credentials(username, password)
     client = _client(token)
     try:
         resp = client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
@@ -104,13 +162,11 @@ def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_tok
 
 
 @mcp.tool()
-def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
-    """Auto-reply to the most recent DM using provided text (or a default). Requires session_id."""
+def auto_reply_latest(username: str, password: str, text: Optional[str] = None) -> str:
+    """Auto-reply to the most recent DM using provided text (or a default)."""
     if not text:
         text = "Thanks! I'll get back to you soon."
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    token = _resolve_session_token(session_id)
+    token = _resolve_token_by_credentials(username, password)
     client = _client(token)
     try:
         ims = client.conversations_list(types="im", limit=1).get("channels", [])
