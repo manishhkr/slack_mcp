@@ -11,7 +11,16 @@ services:
     envVars:
       - key: FASTMCP_HOST
         value: 0.0.0.0
-      # Optionally set your Slack token here or via Render/Secrets Manager
+      - key: DB_HOST
+        value: <your-db-host>
+      - key: DB_PORT
+        value: 5432
+      - key: DB_NAME
+        value: slack
+      - key: DB_USER
+        value: postgres
+      - key: DB_PASSWORD
+        sync: false
+      # Optional Slack Bot Token if needed
       # - key: SLACK_BOT_TOKEN
       #   sync: false
-
