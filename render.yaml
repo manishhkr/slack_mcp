@@ -6,21 +6,20 @@ services:
     plan: free
     autoDeploy: true
     region: oregon
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python fastmcp_slack.py
     envVars:
       - key: FASTMCP_HOST
         value: 0.0.0.0
+      - key: FASTMCP_PORT
+        value: 8010
       - key: DB_HOST
-        value: <your-db-host>
+        value: dpg-d3mj59u3jp1c7380oigg-a
       - key: DB_PORT
         value: 5432
       - key: DB_NAME
-        value: slack
+        value: slack_db_iur4
       - key: DB_USER
-        value: postgres
+        value: slack_db_iur4_user
       - key: DB_PASSWORD
-        sync: false
-      # Optional Slack Bot Token if needed
-      # - key: SLACK_BOT_TOKEN
-      #   sync: false
+        sync: false   # mark as secret in Render

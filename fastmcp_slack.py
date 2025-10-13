@@ -20,11 +20,16 @@ mcp = FastMCP("slack")
 # -----------------------------
 # Database Configuration (from environment variables)
 # -----------------------------
-DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_HOST = os.getenv("DB_HOST")
 DB_PORT = int(os.getenv("DB_PORT", 5432))
-DB_NAME = os.getenv("DB_NAME", "slack")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Manish@123")  # local default for testing
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+
+# Check required environment variables
+for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]:
+    if not globals()[var]:
+        raise RuntimeError(f"Environment variable {var} not set")
 
 # -----------------------------
 # Database Utilities
@@ -42,7 +47,6 @@ def _db_connect():
         )
     except Exception as e:
         raise RuntimeError(f"Database connection failed: {e}")
-
 
 def _db_init() -> None:
     """Create the users table if it does not exist."""
@@ -76,7 +80,6 @@ def _hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]
     )
     return salt, dk.hex()
 
-
 def _verify_password(password: str, salt: str, password_hash_hex: str) -> bool:
     _, computed_hex = _hash_password(password, salt)
     return hmac.compare_digest(computed_hex, password_hash_hex)
@@ -94,7 +97,6 @@ def _client(token: str) -> WebClient:
     if not token.startswith("xoxb-"):
         raise ValueError("Expected a Slack Bot token starting with xoxb-")
     return WebClient(token=token)
-
 
 def _resolve_token_by_credentials(username: str, password: str) -> str:
     with _db_connect() as conn:
@@ -129,7 +131,6 @@ def sign_up(username: str, password: str, bot_token: str) -> str:
     print(f"User '{username}' inserted into DB successfully.")
     return json.dumps({"ok": True}, ensure_ascii=False)
 
-
 @mcp.tool()
 def login(username: str, password: str) -> str:
     _db_init()
@@ -138,7 +139,6 @@ def login(username: str, password: str) -> str:
         return json.dumps({"ok": True}, ensure_ascii=False)
     except ValueError:
         return json.dumps({"ok": False, "error": "invalid_credentials"}, ensure_ascii=False)
-
 
 @mcp.tool()
 def get_user(username: str) -> str:
@@ -151,7 +151,6 @@ def get_user(username: str) -> str:
                 return json.dumps({"exists": False})
             return json.dumps({"exists": True, "username": row["username"], "created_at": row["created_at"]})
 
-
 @mcp.tool()
 def list_dms(username: str, password: str, limit: int = 20) -> str:
     try:
@@ -161,7 +160,6 @@ def list_dms(username: str, password: str, limit: int = 20) -> str:
         return json.dumps(resp.get("channels", []), ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
-
 
 @mcp.tool()
 def list_recent_messages(channel: str, username: str, password: str, limit: int = 20) -> str:
@@ -173,7 +171,6 @@ def list_recent_messages(channel: str, username: str, password: str, limit: int 
     except SlackApiError as e:
         return f"error: {e.response['error']}"
 
-
 @mcp.tool()
 def send_reply(channel: str, text: str, username: str, password: str, thread_ts: Optional[str] = None) -> str:
     try:
@@ -183,7 +180,6 @@ def send_reply(channel: str, text: str, username: str, password: str, thread_ts:
         return json.dumps({"ok": resp.get("ok", False), "channel": resp.get("channel"), "ts": resp.get("ts")}, ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
-
 
 @mcp.tool()
 def auto_reply_latest(username: str, password: str, text: Optional[str] = None) -> str:
@@ -208,7 +204,6 @@ if __name__ == "__main__":
     host = os.getenv("FASTMCP_HOST", "0.0.0.0")
     port = int(os.getenv("FASTMCP_PORT") or os.getenv("PORT") or 8010)
 
-    # Initialize DB at startup
     _db_init()
 
     mcp.settings.host = host
