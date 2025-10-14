@@ -2,4 +2,4 @@ fastapi                 # If you plan to expose HTTP endpoints via FastAPI
 mcp>=1.16.0             # MCP server
 slack-sdk               # Slack WebClient
 uvicorn[standard]       # FastAPI/HTTP server
-sqlite3                 # Built-in in Python, no need to install separately
+python-dotenv
