@@ -6,12 +6,12 @@ services:
     plan: free
     autoDeploy: true
     region: oregon
+    disk: 1GB  # Required for persistent sessions
     buildCommand: pip install -r requirements.txt
     startCommand: python fastmcp_slack.py
     envVars:
       - key: FASTMCP_HOST
         value: 0.0.0.0
-      # Optionally set your Slack token here or via Render/Secrets Manager
+      # Optional: set default Slack bot token if you want
       # - key: SLACK_BOT_TOKEN
       #   sync: false
-
