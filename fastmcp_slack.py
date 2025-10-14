@@ -45,14 +45,11 @@ def _resolve_session_token(session_id: Optional[str]) -> str:
 
 @mcp.tool()
 def create_session(bot_token: str) -> str:
-    """Create a session and store the provided bot token. Returns { ok, session_id }."""
-    try:
-        _ = _client(bot_token)  # validate format and token usability lazily
-        session_id = uuid.uuid4().hex
-        SESSION_TOKENS[session_id] = bot_token
-        return json.dumps({"ok": True, "session_id": session_id})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
+    """Create a session and store the provided bot token. Returns session_id."""
+    _ = _client(bot_token)  # validate format and token usability lazily
+    session_id = uuid.uuid4().hex
+    SESSION_TOKENS[session_id] = bot_token
+    return json.dumps({"session_id": session_id})
 
 
 @mcp.tool()
@@ -68,48 +65,42 @@ def destroy_session(session_id: str) -> str:
 def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
     """List latest Slack IM channels (DMs). Requires a valid session_id from create_session."""
     if bot_token and not session_id:
-        return json.dumps({"ok": False, "error": "session_required", "hint": "call create_session(bot_token) and pass session_id"})
+        return "error: session_required - call create_session(bot_token) and pass session_id"
+    token = _resolve_session_token(session_id)
+    client = _client(token)
     try:
-        token = _resolve_session_token(session_id)
-        client = _client(token)
         resp = client.conversations_list(types="im", limit=limit)
-        return json.dumps({"ok": True, "channels": resp.get("channels", [])}, ensure_ascii=False)
+        return json.dumps(resp.get("channels", []), ensure_ascii=False)
     except SlackApiError as e:
-        return json.dumps({"ok": False, "error": e.response.get("error")})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
+        return f"error: {e.response['error']}"
 
 
 @mcp.tool()
 def list_recent_messages(channel: str, bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
     """List recent messages in an IM channel. Requires session_id from create_session."""
     if bot_token and not session_id:
-        return json.dumps({"ok": False, "error": "session_required", "hint": "call create_session(bot_token) and pass session_id"})
+        return "error: session_required - call create_session(bot_token) and pass session_id"
+    token = _resolve_session_token(session_id)
+    client = _client(token)
     try:
-        token = _resolve_session_token(session_id)
-        client = _client(token)
         resp = client.conversations_history(channel=channel, limit=limit)
-        return json.dumps({"ok": True, "messages": resp.get("messages", [])}, ensure_ascii=False)
+        return json.dumps(resp.get("messages", []), ensure_ascii=False)
     except SlackApiError as e:
-        return json.dumps({"ok": False, "error": e.response.get("error")})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
+        return f"error: {e.response['error']}"
 
 
 @mcp.tool()
 def send_reply(channel: str, text: str, thread_ts: Optional[str] = None, bot_token: Optional[str] = None, session_id: Optional[str] = None) -> str:
     """Send a message to a channel (IM) or thread. Requires session_id from create_session."""
     if bot_token and not session_id:
-        return json.dumps({"ok": False, "error": "session_required", "hint": "call create_session(bot_token) and pass session_id"})
+        return "error: session_required - call create_session(bot_token) and pass session_id"
+    token = _resolve_session_token(session_id)
+    client = _client(token)
     try:
-        token = _resolve_session_token(session_id)
-        client = _client(token)
         resp = client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
         return json.dumps({"ok": resp.get("ok", False), "channel": resp.get("channel"), "ts": resp.get("ts")}, ensure_ascii=False)
     except SlackApiError as e:
-        return json.dumps({"ok": False, "error": e.response.get("error")})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
+        return f"error: {e.response['error']}"
 
 
 @mcp.tool()
@@ -118,20 +109,18 @@ def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = Non
     if not text:
         text = "Thanks! I'll get back to you soon."
     if bot_token and not session_id:
-        return json.dumps({"ok": False, "error": "session_required", "hint": "call create_session(bot_token) and pass session_id"})
+        return "error: session_required - call create_session(bot_token) and pass session_id"
+    token = _resolve_session_token(session_id)
+    client = _client(token)
     try:
-        token = _resolve_session_token(session_id)
-        client = _client(token)
         ims = client.conversations_list(types="im", limit=1).get("channels", [])
         if not ims:
-            return json.dumps({"ok": False, "error": "no_im_channels"})
+            return "error: no_im_channels"
         ch = ims[0]["id"]
         resp = client.chat_postMessage(channel=ch, text=text)
-        return json.dumps({"ok": True, "channel": ch, "ts": resp.get("ts")}, ensure_ascii=False)
+        return json.dumps({"channel": ch, "ts": resp.get("ts")}, ensure_ascii=False)
     except SlackApiError as e:
-        return json.dumps({"ok": False, "error": e.response.get("error")})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
+        return f"error: {e.response['error']}"
 
 
 # if __name__ == "__main__":
