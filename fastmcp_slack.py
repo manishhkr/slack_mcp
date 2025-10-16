@@ -121,6 +121,35 @@ def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = Non
         return json.dumps({"channel": ch, "ts": resp.get("ts")}, ensure_ascii=False)
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+    
+@mcp.tool()
+def list_latest_messages_all(session_id: str, limit_per_channel: int = 1) -> str:
+    """Fetch latest messages from all DM channels automatically."""
+    try:
+        token = _resolve_session_token(session_id)
+        client = _client(token)
+        
+        # Step 1: get all DM channels
+        channels = client.conversations_list(types="im", limit=100).get("channels", [])
+        all_messages = []
+
+        # Step 2: fetch messages for each channel
+        for ch in channels:
+            resp = client.conversations_history(channel=ch["id"], limit=limit_per_channel)
+            messages = resp.get("messages", [])
+            for m in messages:
+                m["channel"] = ch["id"]  # add channel info
+            all_messages.extend(messages)
+
+        # Step 3: sort all messages by timestamp descending
+        all_messages.sort(key=lambda x: float(x["ts"]), reverse=True)
+
+        # Optional: return top N messages globally
+        return json.dumps(all_messages[:limit_per_channel], ensure_ascii=False)
+    
+    except SlackApiError as e:
+        return f"error: {e.response['error']}"
+
 
 
 # if __name__ == "__main__":
