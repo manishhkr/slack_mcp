@@ -62,17 +62,54 @@ def destroy_session(session_id: str) -> str:
 
 
 @mcp.tool()
-def list_dms(bot_token: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> str:
-    """List latest Slack IM channels (DMs). Requires a valid session_id from create_session."""
-    if bot_token and not session_id:
-        return "error: session_required - call create_session(bot_token) and pass session_id"
-    token = _resolve_session_token(session_id)
-    client = _client(token)
+def list_dms(session_id: str, limit_per_channel: int = 5) -> str:
+    """
+    List all DM channels along with their latest messages.
+
+    Args:
+        session_id: Session ID from create_session
+        limit_per_channel: Number of latest messages to fetch per channel
+
+    Returns:
+        JSON array of DM channels with messages
+    """
     try:
-        resp = client.conversations_list(types="im", limit=limit)
-        return json.dumps(resp.get("channels", []), ensure_ascii=False)
+        token = _resolve_session_token(session_id)
+        client = _client(token)
+
+        # Step 1: fetch all DM channels
+        channels = []
+        next_cursor = None
+        while True:
+            resp = client.conversations_list(types="im", limit=100, cursor=next_cursor)
+            channels.extend(resp.get("channels", []))
+            next_cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not next_cursor:
+                break
+
+        # Step 2: for each DM channel, fetch latest messages
+        dms_with_messages = []
+        for ch in channels:
+            resp = client.conversations_history(channel=ch["id"], limit=limit_per_channel)
+            messages = resp.get("messages", [])
+            formatted_messages = [
+                {
+                    "user": m.get("user"),
+                    "text": m.get("text"),
+                    "ts": m.get("ts")
+                } for m in messages
+            ]
+            dms_with_messages.append({
+                "channel": ch["id"],
+                "user": ch.get("user"),  # DM partner
+                "latest_messages": formatted_messages
+            })
+
+        return json.dumps(dms_with_messages, ensure_ascii=False)
+
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+
 
 
 @mcp.tool()
@@ -123,32 +160,55 @@ def auto_reply_latest(text: Optional[str] = None, bot_token: Optional[str] = Non
         return f"error: {e.response['error']}"
     
 @mcp.tool()
-def list_latest_messages_all(session_id: str, limit_per_channel: int = 1) -> str:
-    """Fetch latest messages from all DM channels automatically."""
+def list_latest_messages_all(session_id: str, limit_per_channel: int = 5, global_limit: int = 20) -> str:
+    """
+    Fetch latest messages from all DM channels.
+    
+    Args:
+        session_id: Session ID from create_session
+        limit_per_channel: Number of messages to fetch per channel
+        global_limit: Maximum number of messages to return across all channels
+    
+    Returns:
+        JSON array of latest messages with channel info
+    """
     try:
+        # Resolve token
         token = _resolve_session_token(session_id)
         client = _client(token)
-        
-        # Step 1: get all DM channels
-        channels = client.conversations_list(types="im", limit=100).get("channels", [])
-        all_messages = []
 
-        # Step 2: fetch messages for each channel
+        # Step 1: fetch all DM channels
+        channels = []
+        next_cursor = None
+        while True:
+            resp = client.conversations_list(types="im", limit=100, cursor=next_cursor)
+            channels.extend(resp.get("channels", []))
+            next_cursor = resp.get("response_metadata", {}).get("next_cursor")
+            if not next_cursor:
+                break
+
+        # Step 2: fetch messages from each channel
+        all_messages = []
         for ch in channels:
             resp = client.conversations_history(channel=ch["id"], limit=limit_per_channel)
             messages = resp.get("messages", [])
             for m in messages:
-                m["channel"] = ch["id"]  # add channel info
-            all_messages.extend(messages)
+                all_messages.append({
+                    "channel": ch["id"],
+                    "user": m.get("user"),
+                    "text": m.get("text"),
+                    "ts": m.get("ts")
+                })
 
-        # Step 3: sort all messages by timestamp descending
+        # Step 3: sort globally by timestamp descending
         all_messages.sort(key=lambda x: float(x["ts"]), reverse=True)
 
-        # Optional: return top N messages globally
-        return json.dumps(all_messages[:limit_per_channel], ensure_ascii=False)
-    
+        # Step 4: return top N globally
+        return json.dumps(all_messages[:global_limit], ensure_ascii=False)
+
     except SlackApiError as e:
         return f"error: {e.response['error']}"
+
 
 
 
